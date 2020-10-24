@@ -1,0 +1,11 @@
+[package]
+name = "morics"
+version = "0.1.0"
+authors = ["Moritz Drexl <mdrexl@fastmail.fm>"]
+edition = "2018"
+
+[dependencies]
+crossbeam = "0.8"
+ureq = { version = "1.5", default-features = false }
+histogram = "0.6"
+futures = "0.1"
