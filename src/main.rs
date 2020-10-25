@@ -7,15 +7,20 @@ fn main() {
 
     let metrics_daemon = registry.spawn(Duration::from_secs(1), "http://localhost:8086/write?db=metrics");
 
+    let c = registry.counter("c", vec![]);
     let t = registry.result_timer("rt", vec![]);
 
-    t.record::<_, _, ()>(|| {
-        thread::sleep(Duration::from_millis(20));
-        Ok(())
+    thread::spawn(move || {
+        loop {
+            t.record::<_, _, ()>(|| {
+                Ok(())
+            }).unwrap();
+        }
     });
-    t.record::<_, (), _>(|| {
-        thread::sleep(Duration::from_millis(10));
-        Err(())
+    thread::spawn(move || {
+        loop {
+            c.inc();
+        }
     });
 
     metrics_daemon.join().unwrap();

@@ -1,9 +1,11 @@
-use crossbeam::atomic::AtomicCell;
 use futures::Future;
 use histogram::Histogram;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc, RwLock,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use ureq;
@@ -17,22 +19,22 @@ trait ToValues {
 /// same counter.
 #[derive(Clone)]
 pub struct Counter {
-    inner: Arc<AtomicCell<usize>>,
+    inner: Arc<AtomicUsize>,
 }
 
 impl Counter {
     fn new() -> Self {
         Self {
-            inner: Arc::new(AtomicCell::new(0)),
+            inner: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn reset(&self) {
-        self.inner.store(0);
+        self.inner.store(0, Ordering::Relaxed);
     }
 
     pub fn inc_by(&self, val: usize) {
-        self.inner.fetch_add(val);
+        self.inner.fetch_add(val, Ordering::Relaxed);
     }
 
     pub fn inc(&self) {
@@ -42,7 +44,7 @@ impl Counter {
 
 impl ToValues for Counter {
     fn flush_values(&self) -> Vec<(&'static str, f64)> {
-        let count = self.inner.load();
+        let count = self.inner.load(Ordering::Relaxed);
         self.reset();
         vec![("count", count as f64)]
     }
@@ -51,24 +53,24 @@ impl ToValues for Counter {
 /// Gauge
 #[derive(Clone)]
 pub struct Gauge {
-    inner: Arc<AtomicCell<f64>>,
+    inner: Arc<AtomicU64>,
 }
 
 impl Gauge {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(AtomicCell::new(0.0)),
+            inner: Arc::new(AtomicU64::new(f64::to_bits(0.0))),
         }
     }
 
     pub fn set(&self, value: f64) {
-        self.inner.store(value);
+        self.inner.store(f64::to_bits(value), Ordering::Relaxed);
     }
 }
 
 impl ToValues for Gauge {
     fn flush_values(&self) -> Vec<(&'static str, f64)> {
-        vec![("value", self.inner.load())]
+        vec![("value", f64::from_bits(self.inner.load(Ordering::Relaxed)))]
     }
 }
 
