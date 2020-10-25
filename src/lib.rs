@@ -12,7 +12,13 @@ use ureq;
 
 /// How to flush the values from a metric and make it ready for a new period.
 trait ToValues {
-    fn flush_values(&self) -> Vec<(&'static str, f64)>;
+    fn flush_values(&self, interval: &Duration) -> Vec<(&'static str, f64)>;
+}
+
+#[inline]
+fn per_second(interval: &Duration, x: f64) -> f64 {
+    let seconds = interval.as_secs() as f64;
+    x / seconds
 }
 
 /// Can be cloned and shared between threads while still counting the
@@ -43,10 +49,10 @@ impl Counter {
 }
 
 impl ToValues for Counter {
-    fn flush_values(&self) -> Vec<(&'static str, f64)> {
+    fn flush_values(&self, interval: &Duration) -> Vec<(&'static str, f64)> {
         let count = self.inner.load(Ordering::Relaxed);
         self.reset();
-        vec![("count", count as f64)]
+        vec![("count", per_second(interval, count as f64))]
     }
 }
 
@@ -69,7 +75,7 @@ impl Gauge {
 }
 
 impl ToValues for Gauge {
-    fn flush_values(&self) -> Vec<(&'static str, f64)> {
+    fn flush_values(&self, _interval: &Duration) -> Vec<(&'static str, f64)> {
         vec![("value", f64::from_bits(self.inner.load(Ordering::Relaxed)))]
     }
 }
@@ -102,9 +108,9 @@ impl Timer {
 }
 
 impl ToValues for Timer {
-    fn flush_values(&self) -> Vec<(&'static str, f64)> {
+    fn flush_values(&self, interval: &Duration) -> Vec<(&'static str, f64)> {
         let mut histogram = self.inner.write().unwrap();
-        let mut result = vec![("count", histogram.entries() as f64)];
+        let mut result = vec![("count", per_second(interval, histogram.entries() as f64))];
         if let Ok(min) = histogram.minimum() {
             result.push(("min", min as f64));
         }
@@ -178,10 +184,10 @@ impl ResultTimer {
 }
 
 impl ToValues for ResultTimer {
-    fn flush_values(&self) -> Vec<(&'static str, f64)> {
-        let mut result = self.timer.flush_values();
-        result.push(("success", self.success.flush_values()[0].1));
-        result.push(("failure", self.failure.flush_values()[0].1));
+    fn flush_values(&self, interval: &Duration) -> Vec<(&'static str, f64)> {
+        let mut result = self.timer.flush_values(interval);
+        result.push(("success", self.success.flush_values(interval)[0].1));
+        result.push(("failure", self.failure.flush_values(interval)[0].1));
         result
     }
 }
@@ -249,7 +255,7 @@ impl Registry {
                 }
                 let values = metric
                     .widget
-                    .flush_values()
+                    .flush_values(&interval)
                     .into_iter()
                     .map(|(k, v)| format!("{}={}", k, v))
                     .collect::<Vec<String>>()

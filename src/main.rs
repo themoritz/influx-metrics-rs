@@ -5,7 +5,7 @@ use std::thread;
 fn main() {
     let registry: &'static Registry = Box::leak(Box::new(Registry::new()));
 
-    let metrics_daemon = registry.spawn(Duration::from_secs(1), "http://localhost:8086/write?db=metrics");
+    let metrics_daemon = registry.spawn(Duration::from_secs(2), "http://localhost:8086/write?db=metrics");
 
     let c = registry.counter("c", vec![]);
     let t = registry.result_timer("rt", vec![]);
