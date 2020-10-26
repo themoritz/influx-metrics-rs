@@ -1,5 +1,6 @@
 use futures::Future;
 use histogram::Histogram;
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::{
@@ -13,6 +14,7 @@ use ureq;
 /// How to flush the values from a metric and make it ready for a new period.
 trait ToValues {
     fn flush_values(&self, interval: &Duration) -> Vec<(&'static str, f64)>;
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[inline]
@@ -54,6 +56,9 @@ impl ToValues for Counter {
         self.reset();
         vec![("count", per_second(interval, count as f64))]
     }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Gauge
@@ -77,6 +82,9 @@ impl Gauge {
 impl ToValues for Gauge {
     fn flush_values(&self, _interval: &Duration) -> Vec<(&'static str, f64)> {
         vec![("value", f64::from_bits(self.inner.load(Ordering::Relaxed)))]
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -132,6 +140,9 @@ impl ToValues for Timer {
         histogram.clear();
         result
     }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// ResultTimer
@@ -181,6 +192,16 @@ impl ResultTimer {
         }
         result
     }
+
+    pub fn success(&self, start: Instant) {
+        self.success.inc();
+        self.timer.time(start);
+    }
+
+    pub fn failure(&self, start: Instant) {
+        self.failure.inc();
+        self.timer.time(start);
+    }
 }
 
 impl ToValues for ResultTimer {
@@ -190,12 +211,52 @@ impl ToValues for ResultTimer {
         result.push(("failure", self.failure.flush_values(interval)[0].1));
         result
     }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
+
+/// HitRatio
+#[derive(Clone)]
+pub struct HitRatio {
+    hits: Counter,
+    misses: Counter,
+}
+
+impl HitRatio {
+    pub fn new() -> Self {
+        Self {
+            hits: Counter::new(),
+            misses: Counter::new(),
+        }
+    }
+
+    pub fn hit(&self) {
+        self.hits.inc();
+    }
+
+    pub fn miss(&self) {
+        self.misses.inc();
+    }
+}
+
+impl ToValues for HitRatio {
+    fn flush_values(&self, interval: &Duration) -> Vec<(&'static str, f64)> {
+        let mut result = vec![];
+        result.push(("hits", self.hits.flush_values(interval)[0].1));
+        result.push(("misses", self.misses.flush_values(interval)[0].1));
+        result
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 
 /// Manages a set of metrics and sends measurements to InfluxDB in
 /// regular intervals.
 pub struct Registry {
-    inner: RwLock<HashMap<String, Metric>>,
+    inner: RwLock<HashMap<Metric, Box<dyn ToValues + Sync + Send>>>,
 }
 
 impl Registry {
@@ -208,32 +269,45 @@ impl Registry {
     fn register<W: 'static + ToValues + Send + Sync + Clone>(
         &self,
         name: &str,
-        tags: Vec<(String, String)>,
+        tags: Vec<(&str, &str)>,
         widget: W,
     ) -> W {
         let metric = Metric {
-            tags,
-            widget: Box::new(widget.clone()),
+            name: name.to_string(),
+            tags: tags.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(),
         };
         let mut metrics = self.inner.write().unwrap();
-        metrics.insert(name.to_string(), metric);
-        widget
+        match metrics.get(&metric) {
+            Some(w) => w
+                .as_any()
+                .downcast_ref::<W>()
+                .expect("Tried to store diffferent widgets under same name/tags.")
+                .clone(),
+            None => {
+                metrics.insert(metric, Box::new(widget.clone()));
+                widget
+            }
+        }
     }
 
-    pub fn counter(&self, name: &str, tags: Vec<(String, String)>) -> Counter {
+    pub fn counter(&self, name: &str, tags: Vec<(&str, &str)>) -> Counter {
         self.register(name, tags, Counter::new())
     }
 
-    pub fn gauge(&self, name: &str, tags: Vec<(String, String)>) -> Gauge {
+    pub fn gauge(&self, name: &str, tags: Vec<(&str, &str)>) -> Gauge {
         self.register(name, tags, Gauge::new())
     }
 
-    pub fn timer(&self, name: &str, tags: Vec<(String, String)>) -> Timer {
+    pub fn timer(&self, name: &str, tags: Vec<(&str, &str)>) -> Timer {
         self.register(name, tags, Timer::new())
     }
 
-    pub fn result_timer(&self, name: &str, tags: Vec<(String, String)>) -> ResultTimer {
+    pub fn result_timer(&self, name: &str, tags: Vec<(&str, &str)>) -> ResultTimer {
         self.register(name, tags, ResultTimer::new())
+    }
+
+    pub fn hit_ratio(&self, name: &str, tags: Vec<(&str, &str)>) -> HitRatio {
+        self.register(name, tags, HitRatio::new())
     }
 
     pub fn spawn(&'static self, interval: Duration, url: &str) -> thread::JoinHandle<()> {
@@ -248,13 +322,12 @@ impl Registry {
 
             let mut body = String::new();
 
-            for (name, metric) in self.inner.read().unwrap().iter() {
-                let mut name_tags = name.clone();
+            for (metric, widget) in self.inner.read().unwrap().iter() {
+                let mut name_tags = metric.name.clone();
                 for (k, v) in metric.tags.iter() {
                     write!(name_tags, ",{}={}", k, v).unwrap();
                 }
-                let values = metric
-                    .widget
+                let values = widget
                     .flush_values(&interval)
                     .into_iter()
                     .map(|(k, v)| format!("{}={}", k, v))
@@ -275,7 +348,8 @@ impl Registry {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
 struct Metric {
+    name: String,
     tags: Vec<(String, String)>,
-    widget: Box<dyn ToValues + Send + Sync>,
 }
