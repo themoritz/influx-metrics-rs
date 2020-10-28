@@ -163,22 +163,27 @@ impl ResultTimer {
         }
     }
 
-    pub fn record_fut<'a, A, E, F>(&'a self, f: F) -> Box<dyn Future<Item = A, Error = E> + 'a>
+    pub fn record_fut<'a, A, E, F>(&self, f: F) -> Box<dyn Future<Item = A, Error = E> + 'a>
     where
         F: FnOnce() -> Box<dyn Future<Item = A, Error = E> + 'a>,
         E: 'a,
         A: 'a,
     {
         let start = Instant::now();
+        let timer1 = self.timer.clone();
+        let timer2 = self.timer.clone();
+        let failure = self.failure.clone();
+        let success = self.success.clone();
+
         Box::new(
             f().map_err(move |e| {
-                self.timer.time(start);
-                self.failure.inc();
+                timer1.time(start);
+                failure.inc();
                 e
             })
             .map(move |a| {
-                self.timer.time(start);
-                self.success.inc();
+                timer2.time(start);
+                success.inc();
                 a
             }),
         )
