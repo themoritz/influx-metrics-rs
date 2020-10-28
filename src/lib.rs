@@ -317,37 +317,48 @@ impl Registry {
 
     pub fn spawn(&'static self, interval: Duration, url: &str) -> thread::JoinHandle<()> {
         let url = url.to_string();
-        thread::spawn(move || loop {
-            thread::sleep(interval);
+        thread::spawn(move || {
+            let mut wait = interval;
+            loop {
+                thread::sleep(wait);
+                let start = Instant::now();
 
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+                let timestamp = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
 
-            let mut body = String::new();
+                let mut body = String::new();
 
-            for (metric, widget) in self.inner.read().unwrap().iter() {
-                let mut name_tags = metric.name.clone();
-                for (k, v) in metric.tags.iter() {
-                    write!(name_tags, ",{}={}", k, v).unwrap();
+                for (metric, widget) in self.inner.read().unwrap().iter() {
+                    let mut name_tags = metric.name.clone();
+                    for (k, v) in metric.tags.iter() {
+                        write!(name_tags, ",{}={}", k, v).unwrap();
+                    }
+                    let values = widget
+                        .flush_values(&interval)
+                        .into_iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect::<Vec<String>>()
+                        .join(",");
+                    write!(body, "{} {} {}\n", name_tags, values, timestamp).unwrap();
                 }
-                let values = widget
-                    .flush_values(&interval)
-                    .into_iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<String>>()
-                    .join(",");
-                write!(body, "{} {} {}\n", name_tags, values, timestamp).unwrap();
-            }
 
-            let resp = ureq::post(&url).send_string(&body);
-            if !resp.ok() {
-                println!(
-                    "Error posting to InfluxDB. Error {}: {}",
-                    resp.status(),
-                    resp.into_string().unwrap()
-                );
+                let resp = ureq::post(&url).send_string(&body);
+                if !resp.ok() {
+                    println!(
+                        "Error posting to InfluxDB. Error {}: {}",
+                        resp.status(),
+                        resp.into_string().unwrap()
+                    );
+                }
+
+                let elapsed = start.elapsed();
+                wait = if elapsed >= interval {
+                    Duration::from_secs(0)
+                } else {
+                    interval - elapsed
+                };
             }
         })
     }
