@@ -1,3 +1,4 @@
+use crossbeam::sync::ShardedLock;
 use futures::Future;
 use histogram::Histogram;
 use std::any::Any;
@@ -252,17 +253,16 @@ impl ToValues for HitRatio {
     }
 }
 
-
 /// Manages a set of metrics and sends measurements to InfluxDB in
 /// regular intervals.
 pub struct Registry {
-    inner: RwLock<HashMap<Metric, Box<dyn ToValues + Sync + Send>>>,
+    inner: ShardedLock<HashMap<Metric, Box<dyn ToValues + Sync + Send>>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
-            inner: RwLock::new(HashMap::new()),
+            inner: ShardedLock::new(HashMap::new()),
         }
     }
 
@@ -274,16 +274,21 @@ impl Registry {
     ) -> W {
         let metric = Metric {
             name: name.to_string(),
-            tags: tags.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(),
+            tags: tags
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<_>>(),
         };
-        let mut metrics = self.inner.write().unwrap();
-        match metrics.get(&metric) {
-            Some(w) => w
-                .as_any()
+        let existing = self.inner.read().unwrap().get(&metric).map(|w| {
+            w.as_any()
                 .downcast_ref::<W>()
                 .expect("Tried to store diffferent widgets under same name/tags.")
-                .clone(),
+                .clone()
+        });
+        match existing {
+            Some(w) => w,
             None => {
+                let mut metrics = self.inner.write().unwrap();
                 metrics.insert(metric, Box::new(widget.clone()));
                 widget
             }
